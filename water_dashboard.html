@@ -6,6 +6,8 @@
 <title>فرضية المياة - لوحة المراقبة</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -203,26 +205,15 @@
 
     <!-- CENTER -->
     <div class="center-panel">
-      <div class="map-container">
-        <div class="map-bg">
-          <div class="map-grid"></div>
-          <div class="map-note">
-            <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24" opacity="0.3"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
-            <span style="color:var(--text3)">الخريطة متاحة في ArcGIS Dashboard</span>
-            <span style="font-size:10px;color:var(--text3);opacity:0.6">هذه اللوحة تعمل كعنصر مكمل للخريطة</span>
-          </div>
-          <div class="basemap-badge">
-            <div style="width:10px;height:10px;border-radius:2px;background:linear-gradient(135deg,#1a2040,#0d1528);border:1px solid var(--border2)"></div>
-            Dark Canvas
-          </div>
-          <div class="map-legend">
-            <div class="legend-title">الموقع</div>
-            <div class="legend-item"><div class="legend-dot" style="background:var(--teal)"></div> عرفات (<span id="leg-arafat">—</span>)</div>
-            <div class="legend-item"><div class="legend-dot" style="background:var(--gold)"></div> منى (<span id="leg-mina">—</span>)</div>
-            <div style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px">
-              <div class="legend-title" style="margin-bottom:6px">نوع الملاحظة</div>
-              <div id="legend-types" style="display:flex;flex-direction:column;gap:5px;font-size:10px;color:var(--text2)">—</div>
-            </div>
+      <div class="map-container" style="position:relative;">
+        <div id="leaflet-map" style="width:100%;height:100%;"></div>
+        <div class="map-legend" style="z-index:1000;">
+          <div class="legend-title">الموقع</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--teal)"></div> عرفات (<span id="leg-arafat">—</span>)</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--gold)"></div> منى (<span id="leg-mina">—</span>)</div>
+          <div style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px">
+            <div class="legend-title" style="margin-bottom:6px">نوع الملاحظة</div>
+            <div id="legend-types" style="display:flex;flex-direction:column;gap:5px;font-size:10px;color:var(--text2)">—</div>
           </div>
         </div>
       </div>
@@ -565,14 +556,101 @@ function searchTable(val) {
   }, 200);
 }
 
+// MAP SETUP
+let leafletMap = null;
+let mapMarkers = L.layerGroup();
+
+function initMap() {
+  if (leafletMap) return;
+  leafletMap = L.map('leaflet-map', {
+    center: [21.38, 39.89],
+    zoom: 12,
+    zoomControl: true,
+    attributionControl: false
+  });
+
+  // Dark tile layer (CartoDB Dark Matter)
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    maxZoom: 19
+  }).addTo(leafletMap);
+
+  mapMarkers.addTo(leafletMap);
+}
+
+async function fetchGeoData() {
+  let features = [];
+  let offset = 0;
+  const pageSize = 1000;
+  while (true) {
+    const url = `${LAYER_URL}/query?where=1=1&outFields=objectid,field_31,field_32,company,field_34,field_3,field_40,field_1&returnGeometry=true&outSR=4326&resultOffset=${offset}&resultRecordCount=${pageSize}&f=json`;
+    const res = await fetch(url);
+    const json = await res.json();
+    if (!json.features || json.features.length === 0) break;
+    features = features.concat(json.features);
+    if (!json.exceededTransferLimit) break;
+    offset += pageSize;
+  }
+  return features;
+}
+
+function renderMap(geoFeatures) {
+  if (!leafletMap) initMap();
+  mapMarkers.clearLayers();
+
+  const locationColors = { 'عرفات': '#00d4aa', 'منى': '#f0a500' };
+  const bounds = [];
+
+  geoFeatures.forEach(f => {
+    const g = f.geometry;
+    const a = f.attributes;
+    if (!g || g.x == null || g.y == null) return;
+    const lat = g.y, lng = g.x;
+    if (lat === 0 && lng === 0) return;
+
+    const color = locationColors[a.field_31] || '#4da6ff';
+    const marker = L.circleMarker([lat, lng], {
+      radius: 7,
+      fillColor: color,
+      color: 'rgba(0,0,0,0.4)',
+      weight: 1.5,
+      fillOpacity: 0.85
+    });
+
+    const hasObs = a.field_3 === 'نعم';
+    marker.bindPopup(`
+      <div dir="rtl" style="font-family:'IBM Plex Sans Arabic',sans-serif;font-size:12px;min-width:170px;">
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">${a.field_34 || '—'}</div>
+        <div style="color:#666">الشركة: ${(a.company||'—')}</div>
+        <div style="color:#666">الموقع: ${a.field_31 || '—'}</div>
+        <div style="color:#666">المربع: ${a.field_32 || '—'}</div>
+        <div style="color:#666">نوع الملاحظة: ${a.field_40 || '—'}</div>
+        <div style="margin-top:4px;font-weight:500;color:${hasObs ? '#00d4aa' : '#ff4d6d'}">${hasObs ? '✓ توجد ملاحظة' : '✗ لا توجد ملاحظة'}</div>
+      </div>
+    `);
+
+    mapMarkers.addLayer(marker);
+    bounds.push([lat, lng]);
+  });
+
+  if (bounds.length > 0) {
+    leafletMap.fitBounds(bounds, { padding: [30, 30] });
+  }
+}
+
 // INIT
 (async () => {
   try {
-    allData = await fetchAllData();
+    initMap();
+    // Fetch attribute data and geo data in parallel
+    const [attrData, geoFeatures] = await Promise.all([fetchAllData(), fetchGeoData()]);
+    allData = attrData;
+
     const now = new Date();
     document.getElementById('last-updated').textContent =
       `آخر تحديث: ${now.toLocaleDateString('ar-SA')} | ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+
     renderAll();
+    renderMap(geoFeatures);
   } catch(e) {
     console.error(e);
     document.getElementById('kpi-total').textContent = 'خطأ';
@@ -584,8 +662,10 @@ function searchTable(val) {
 // Auto-refresh every 5 minutes
 setInterval(async () => {
   try {
-    allData = await fetchAllData();
+    const [attrData, geoFeatures] = await Promise.all([fetchAllData(), fetchGeoData()]);
+    allData = attrData;
     renderAll();
+    renderMap(geoFeatures);
   } catch(e) { console.error('Auto-refresh failed', e); }
 }, 5 * 60 * 1000);
 </script>
